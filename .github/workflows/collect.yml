@@ -34,13 +34,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 1
+          # 必须完整历史：浅克隆下 worktree 里只有 1 个 commit，
+          # amend 后父链就断了，force push 会把远程历史压成 1 个
+          fetch-depth: 0
 
       - name: 取回云端已保存的全部快照
         run: |
           TODAY=$(TZ=Asia/Shanghai date +%F)
           echo "TODAY=$TODAY" >> "$GITHUB_ENV"
-          if git fetch origin data --depth=1 2>/dev/null; then
+          if git fetch origin data 2>/dev/null; then
             if git checkout origin/data -- output/news/ 2>/dev/null; then
               echo "✅ 云端已有 $(ls output/news | wc -l) 个快照，当天的那个作为基线继续累积："
               ls -la output/news/ | tail -5
