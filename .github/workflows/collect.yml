@@ -12,7 +12,7 @@ name: Collect Hot News
 #   → 每天一个 commit，永久保留；git 历史可回溯，任何一次事故都能救回来
 #
 # 本机取数据：
-#   git fetch origin data && git checkout origin/data -- output/news/
+#   git fetch origin data && git restore --source=origin/data --worktree -- output/news/
 
 on:
   schedule:
