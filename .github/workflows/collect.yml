@@ -99,6 +99,11 @@ jobs:
           # .gitignore 里忽略了 /output/，这里强制加入
           git add -f output/news
 
+          if git diff --cached --quiet; then
+            echo "→ 数据无变化，跳过提交"
+            exit 0
+          fi
+
           # 当天已经提交过 → amend 覆盖（一天只留一个 commit）；跨天 → 新增 commit
           LAST_MSG=$(git log -1 --format=%s 2>/dev/null || echo "")
           if [ "$LAST_MSG" = "data: $TODAY" ]; then
