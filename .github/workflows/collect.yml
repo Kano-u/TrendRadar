@@ -1,0 +1,91 @@
+name: Collect Hot News
+
+# 云端只做采集：抓 8 个热榜平台 → 累积当天的 SQLite → 推到 data 分支。
+# AI 筛选不在这里做（本机 wb2api 才是筛选题的地方），所以这里把筛选关掉，纯采集。
+#
+# 数据流向：
+#   data 分支的 output/news/{今天}.db   ← 上次运行留下的基线
+#        ↓ 追加本次抓取
+#   orphan commit 强制覆盖推回 data 分支（不留历史，仓库不膨胀）
+#
+# 本机取数据：
+#   git fetch origin data && git checkout origin/data -- output/news/
+
+on:
+  schedule:
+    - cron: "33 * * * *"      # 每小时第 33 分钟
+  workflow_dispatch:
+
+permissions:
+  contents: write             # 推 data 分支需要写权限
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: 取回当天的 db 基线
+        run: |
+          TODAY=$(TZ=Asia/Shanghai date +%F)
+          echo "TODAY=$TODAY" >> "$GITHUB_ENV"
+          if git fetch origin data --depth=1 2>/dev/null; then
+            if git checkout origin/data -- output/news/ 2>/dev/null; then
+              echo "✅ 已从 data 分支取回历史快照："
+              ls -la output/news/ || true
+            else
+              echo "ℹ️ data 分支里没有 output/news/，从零开始"
+            fi
+          else
+            echo "ℹ️ data 分支还不存在，从零开始"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: uv sync --frozen --no-dev
+
+      - name: 关掉 AI 筛选与 HTML 报告（云端只采集）
+        run: |
+          sed -i 's/^  method: "ai"/  method: "keyword"/' config/config.yaml
+          sed -i 's/^    html: true.*$/    html: false/' config/config.yaml
+          grep -E '^  method:|^    html:' config/config.yaml
+
+      - name: 采集
+        env:
+          PYTHONUTF8: "1"
+        run: uv run python -m trendradar
+
+      - name: 推送到 data 分支
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 只保留最近 30 天，避免仓库无限膨胀
+          find output/news -name '*.db' -mtime +30 -delete || true
+          echo "本次要推送的快照："
+          ls -la output/news/
+
+          # orphan 分支：每次都是一次性快照，不带历史
+          git checkout --orphan data-snapshot
+          git rm -rf --cached . > /dev/null
+
+          # .gitignore 里忽略了 /output/，这里强制加入
+          git add -f output/news
+          git commit -m "data: ${TODAY} 热榜快照（$(date -u +%FT%H:%MZ)）"
+          git push -f origin data-snapshot:data
