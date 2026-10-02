@@ -6,3 +6,6 @@ __pycache__/
 # TrendRadar 运行时产物（全部由程序生成，不入库）
 /index.html
 /output/
+
+# filter 的运行时产物（label_history.py 会重新生成）
+/filter/data/titles.csv
