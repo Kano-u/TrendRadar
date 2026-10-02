@@ -15,7 +15,10 @@ name: Collect Hot News
 # 本机取数据：
 #   gh release download data-2026 --dir output/news --clobber
 #
-# AI 筛选不在这里做（本机 wb2api 才是筛选题的地方），所以下面把筛选关掉，纯采集。
+# AI 筛选不在这里做（本机 wb2api 才是筛选题的地方）。
+# 下面把 filter.method 改成 keyword，只是为了让云端不去尝试调用不存在的 AI 接口；
+# trendradar 的采集层存全量、筛选层只影响 HTML 报告，所以 db 里的 news_items 永远是全部标题，
+# 不会因为关键词/筛选而少掉任何一条（运行日志里的「自检」那一步就是在证明这件事）。
 
 on:
   schedule:
@@ -74,6 +77,21 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: uv run python -m trendradar
+
+      - name: 自检：db 里是全量数据（证明没被关键词/筛选剔掉过）
+        run: |
+          uv run python -c '
+          import sqlite3, os
+          db = "output/news/" + os.environ["TODAY"] + ".db"
+          c = sqlite3.connect(db)
+          total = c.execute("select count(*) from news_items").fetchone()[0]
+          plats = c.execute("select platform_id, count(*) from news_items group by 1 order by 2 desc").fetchall()
+          filtered = c.execute("select count(*) from ai_filter_results").fetchone()[0]
+          analyzed = c.execute("select count(*) from ai_filter_analyzed_news").fetchone()[0]
+          print(f"去重标题 {total} 条；筛选结果行数 {filtered}；已分析标记 {analyzed}（后两个应为 0）")
+          print("平台分布:", dict(plats))
+          assert filtered == 0 and analyzed == 0, "云端不应写入任何筛选结果"
+          '
 
       - name: 上传快照到 Release
         run: |
