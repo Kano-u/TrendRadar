@@ -1,18 +1,18 @@
 name: Collect Hot News
 
-# 云端只做采集：抓 8 个热榜平台 → 累积当天的 SQLite → 推到 data 分支。
-# AI 筛选不在这里做（本机 wb2api 才是筛选题的地方），所以这里把筛选关掉，纯采集。
+# 云端只做采集：抓 8 个热榜平台 → 累积当天的 SQLite → 传到 Release。
+# 用 Release assets 而不是 git 分支，数据不占仓库体积，也不会让仓库越来越胖。
 #
 # 数据流向：
-#   data 分支的 output/news/*.db      ← 云端已保存的全部历史快照
-#        ↓ 取回工作区，当天那份作为基线
-#   跑一次采集（追加当天的排名轨迹）
-#        ↓
-#   推回 data 分支：当天已有 commit 就 amend 覆盖，跨天了就新增一个 commit
-#   → 每天一个 commit，永久保留；git 历史可回溯，任何一次事故都能救回来
+#   Release "data" 的 assets（每天一个 db，永久保留）
+#        ↓ gh release download（把当天那个取回来当基线）
+#   runner 上继续累积（排名轨迹越长越完整）
+#        ↓ gh release upload --clobber（同名文件覆盖更新，其他天的不动）
 #
 # 本机取数据：
-#   git fetch origin data && git restore --source=origin/data --worktree -- output/news/
+#   gh release download data --dir output/news --clobber
+#
+# AI 筛选不在这里做（本机 wb2api 才是筛选题的地方），所以下面把筛选关掉，纯采集。
 
 on:
   schedule:
@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write             # 推 data 分支需要写权限
+  contents: write             # 创建/更新 Release 需要写权限
 
 concurrency:
   group: collect
@@ -30,27 +30,22 @@ jobs:
   collect:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          # 必须完整历史：浅克隆下 worktree 里只有 1 个 commit，
-          # amend 后父链就断了，force push 会把远程历史压成 1 个
-          fetch-depth: 0
 
-      - name: 取回云端已保存的全部快照
+      - name: 取回当天的 db 基线
         run: |
           TODAY=$(TZ=Asia/Shanghai date +%F)
           echo "TODAY=$TODAY" >> "$GITHUB_ENV"
-          if git fetch origin data 2>/dev/null; then
-            if git checkout origin/data -- output/news/ 2>/dev/null; then
-              echo "✅ 云端已有 $(ls output/news | wc -l) 个快照，当天的那个作为基线继续累积："
-              ls -la output/news/ | tail -5
-            else
-              echo "ℹ️ data 分支里没有 output/news/，从零开始"
-            fi
+          mkdir -p output/news
+          if gh release download data --pattern "${TODAY}.db" --dir output/news --clobber 2>/dev/null; then
+            echo "✅ 已取回 ${TODAY}.db 作为基线，本次继续往上累积"
+            ls -la output/news/
           else
-            echo "ℹ️ data 分支还不存在，从零开始"
+            echo "ℹ️ ${TODAY}.db 还不存在（今天第一次采集）"
           fi
 
       - name: Set up Python
@@ -75,44 +70,15 @@ jobs:
           PYTHONUTF8: "1"
         run: uv run python -m trendradar
 
-      - name: 推送到 data 分支
+      - name: 上传快照到 Release
         run: |
           set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # 用 worktree 操作 data 分支，不打扰主工作区；历史快照全部带过去
-          if git fetch origin data:data 2>/dev/null; then
-            git worktree add /tmp/datawk data
-            cd /tmp/datawk
-            echo "云端已保存 $(ls output/news 2>/dev/null | wc -l) 个快照"
-          else
-            git worktree add --detach /tmp/datawk
-            cd /tmp/datawk
-            git checkout --orphan data
-            git rm -rf --cached . > /dev/null 2>&1 || true
+          if ! gh release view data > /dev/null 2>&1; then
+            gh release create data --title "热榜快照" --latest=false \
+              --notes "TrendRadar 每小时采集的 8 平台热榜快照，每天一个 db。"
           fi
-
-          mkdir -p output/news
-          cp "$GITHUB_WORKSPACE"/output/news/*.db output/news/
-          echo "本次将保存 $(ls output/news | wc -l) 个快照："
-          ls -la output/news/
-
-          # .gitignore 里忽略了 /output/，这里强制加入
-          git add -f output/news
-
-          if git diff --cached --quiet; then
-            echo "→ 数据无变化，跳过提交"
-            exit 0
-          fi
-
-          # 当天已经提交过 → amend 覆盖（一天只留一个 commit）；跨天 → 新增 commit
-          LAST_MSG=$(git log -1 --format=%s 2>/dev/null || echo "")
-          if [ "$LAST_MSG" = "data: $TODAY" ]; then
-            git commit --amend -m "data: $TODAY"
-            echo "→ 已 amend 当天的 commit"
-          else
-            git commit -m "data: $TODAY"
-            echo "→ 新增 commit（$LAST_MSG → data: $TODAY）"
-          fi
-          git push -f origin data
+          echo "本次上传 ${TODAY}.db："
+          ls -la "output/news/${TODAY}.db"
+          gh release upload data "output/news/${TODAY}.db" --clobber
+          echo "── Release 现有快照 ──"
+          gh release view data --json assets -q '.assets[].name' | sort
