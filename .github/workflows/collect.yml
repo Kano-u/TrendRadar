@@ -4,9 +4,12 @@ name: Collect Hot News
 # AI 筛选不在这里做（本机 wb2api 才是筛选题的地方），所以这里把筛选关掉，纯采集。
 #
 # 数据流向：
-#   data 分支的 output/news/{今天}.db   ← 上次运行留下的基线
-#        ↓ 追加本次抓取
-#   orphan commit 强制覆盖推回 data 分支（不留历史，仓库不膨胀）
+#   data 分支的 output/news/*.db      ← 云端已保存的全部历史快照
+#        ↓ 取回工作区，当天那份作为基线
+#   跑一次采集（追加当天的排名轨迹）
+#        ↓
+#   推回 data 分支：当天已有 commit 就 amend 覆盖，跨天了就新增一个 commit
+#   → 每天一个 commit，永久保留；git 历史可回溯，任何一次事故都能救回来
 #
 # 本机取数据：
 #   git fetch origin data && git checkout origin/data -- output/news/
@@ -33,14 +36,14 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 取回当天的 db 基线
+      - name: 取回云端已保存的全部快照
         run: |
           TODAY=$(TZ=Asia/Shanghai date +%F)
           echo "TODAY=$TODAY" >> "$GITHUB_ENV"
           if git fetch origin data --depth=1 2>/dev/null; then
             if git checkout origin/data -- output/news/ 2>/dev/null; then
-              echo "✅ 已从 data 分支取回历史快照："
-              ls -la output/news/ || true
+              echo "✅ 云端已有 $(ls output/news | wc -l) 个快照，当天的那个作为基线继续累积："
+              ls -la output/news/ | tail -5
             else
               echo "ℹ️ data 分支里没有 output/news/，从零开始"
             fi
@@ -76,16 +79,33 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 只保留最近 30 天，避免仓库无限膨胀
-          find output/news -name '*.db' -mtime +30 -delete || true
-          echo "本次要推送的快照："
-          ls -la output/news/
+          # 用 worktree 操作 data 分支，不打扰主工作区；历史快照全部带过去
+          if git fetch origin data:data 2>/dev/null; then
+            git worktree add /tmp/datawk data
+            cd /tmp/datawk
+            echo "云端已保存 $(ls output/news 2>/dev/null | wc -l) 个快照"
+          else
+            git worktree add --detach /tmp/datawk
+            cd /tmp/datawk
+            git checkout --orphan data
+            git rm -rf --cached . > /dev/null 2>&1 || true
+          fi
 
-          # orphan 分支：每次都是一次性快照，不带历史
-          git checkout --orphan data-snapshot
-          git rm -rf --cached . > /dev/null
+          mkdir -p output/news
+          cp "$GITHUB_WORKSPACE"/output/news/*.db output/news/
+          echo "本次将保存 $(ls output/news | wc -l) 个快照："
+          ls -la output/news/
 
           # .gitignore 里忽略了 /output/，这里强制加入
           git add -f output/news
-          git commit -m "data: ${TODAY} 热榜快照（$(date -u +%FT%H:%MZ)）"
-          git push -f origin data-snapshot:data
+
+          # 当天已经提交过 → amend 覆盖（一天只留一个 commit）；跨天 → 新增 commit
+          LAST_MSG=$(git log -1 --format=%s 2>/dev/null || echo "")
+          if [ "$LAST_MSG" = "data: $TODAY" ]; then
+            git commit --amend -m "data: $TODAY"
+            echo "→ 已 amend 当天的 commit"
+          else
+            git commit -m "data: $TODAY"
+            echo "→ 新增 commit（$LAST_MSG → data: $TODAY）"
+          fi
+          git push -f origin data
